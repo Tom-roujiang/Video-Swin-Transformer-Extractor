@@ -9,6 +9,7 @@ from tqdm import tqdm
 from torch.autograd import Variable
 import argparse
 import h5py
+import cv2
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID" 
 
 
@@ -38,17 +39,25 @@ checkpoint = './checkpoints/swin_base_patch244_window1677_sthv2.pth'
 
 cfg = Config.fromfile(config)
 model = build_model(cfg.model, train_cfg=None, test_cfg=cfg.get('test_cfg'))
-load_checkpoint(model, checkpoint, map_location='cuda:0')
+load_checkpoint(model, checkpoint, map_location='cpu')
 
 '''
 use the pretrained SwinTransformer3D as feature extractor
 '''
 
 
-def load_frame(frame_file):
+def load_frame(hdf5_file, frame_file):
 
-    data = Image.open(frame_file) 
+    data = hdf5_file[frame_file]
+    data = np.array(data)
+    data = Image.fromarray(data)
+    # data = Image.open(data) 
     data = data.resize((224, 224), Image.LANCZOS)
+
+    # image = data.astype(np.uint8)
+    # resized_image = cv2.resize(image, (224, 224))
+    # data = data.resize((224, 224), Image.LANCZOS)
+    # data = resized_image.astype(np.float32)
 
     data = np.array(data)
     data = data.astype(float)
@@ -61,13 +70,17 @@ def load_frame(frame_file):
 
 
 def load_rgb_batch(frames_dir, rgb_files, 
-                   frame_indices):  
+                   frame_indices, hdf5_file):  
     # 表示一个批次中的所有视频片段及其每一帧的 RGB 图像。
     batch_data = np.zeros(frame_indices.shape + (224,224,3)) # b x clip length x 224 x 224 x 3  
     for i in range(frame_indices.shape[0]):
         for j in range(frame_indices.shape[1]):
-            batch_data[i,j,:,:,:] = load_frame(os.path.join(frames_dir, 
-                rgb_files[frame_indices[i][j]]))
+
+            frame_path = '{}/{}'.format(frames_dir, rgb_files[frame_indices[i][j]])
+            batch_data[i,j,:,:,:] = load_frame(hdf5_file, frame_path)
+
+            # batch_data[i,j,:,:,:] = load_frame(os.path.join(frames_dir, 
+            #     rgb_files[frame_indices[i][j]]))
     return batch_data
 
 
@@ -76,7 +89,7 @@ def forward_batch(b_data, model):
     b_data = torch.from_numpy(b_data)     # b x 3 x Temporial(length of a clip) x 224 x 224
     with torch.no_grad():
         model.eval()
-        b_data = Variable(b_data.cuda()).float()
+        b_data = Variable(b_data.cpu()).float()
         b_features = model(b_data)
     b_features = b_features.data.cpu().numpy()[:,:,0,0,0]
     return b_features
@@ -88,7 +101,7 @@ def extract_feature(args_item):
     chunk_size = 16          # 每个clip包含帧的数量 
     frequency=16             # frequency表示帧采样的频率
     sample_mode='oversample'
-    video_name=video_dir.split("\\")[-1]
+    video_name=video_dir.split("/")[-1]
     assert(mode in ['rgb', 'flow'])
     assert(sample_mode in ['oversample', 'center_crop', 'resize'])
     save_file = '{}_{}.npy'.format(video_name, "swin")
@@ -101,12 +114,13 @@ def extract_feature(args_item):
         # setup the model  
         cfg = Config.fromfile(config)
         model = build_model(cfg.model, train_cfg=None, test_cfg=cfg.get('test_cfg'))
-        load_checkpoint(model, checkpoint, map_location='cuda:0')
+        load_checkpoint(model, checkpoint, map_location='cpu')
         # model.eval()
-        model = model.backbone.to('cuda')
+        model = model.backbone.to('cpu')
         
-         
-        rgb_files = [i for i in os.listdir(video_dir) if i.endswith('jpg')]
+        f = h5py.File("/Users/liyun/Desktop/h5py-test/mytestfile1.hdf5", 'r')
+        rgb_files = [i for i in f[video_dir] if i.endswith('jpg')]
+        # rgb_files = [i for i in os.listdir(video_dir) if i.endswith('jpg')]
         rgb_files.sort(key=lambda x:int(x.split("_")[1].split(".")[0]))
         frame_cnt = len(rgb_files)
 
@@ -145,7 +159,7 @@ def extract_feature(args_item):
         # full_features = [[] for i in range(10)]
         # # 
         for batch_id in tqdm(range(batch_num)):       
-            batch_data = load_rgb_batch(video_dir, rgb_files, frame_indices[batch_id])
+            batch_data = load_rgb_batch(video_dir, rgb_files, frame_indices[batch_id], f)
             full_features = forward_batch(batch_data, model)
 
         np.save(os.path.join(output_dir,save_file), full_features)
@@ -160,7 +174,7 @@ if __name__ == '__main__':
     parser.add_argument('--mode', default="rgb",type=str)
     # parser.add_argument('--load_model',default="feature_extract/model_rgb.pth", type=str)
     # parser.add_argument('--input_dir', default="UCF_Crime_Frames",type=str)
-    parser.add_argument('--input_hdf5', default="UCF_Crime_Frames",type=str)
+    parser.add_argument('--input_hdf5', default="/Users/liyun/Desktop/h5py-test/mytestfile1.hdf5",type=str)
     parser.add_argument('--output_dir',default="UCF-Swin", type=str)
     parser.add_argument('--batch_size', type=int, default=20)
     # parser.add_argument('--sample_mode', default="oversample",type=str)
@@ -178,7 +192,7 @@ if __name__ == '__main__':
     for key in f.keys():
         type_path = f"/{key}"   # save the path of the type
         for video_name in f[type_path]:
-            save_file = '{}_{}.npy'.format(video_name, "swintrans")
+            save_file = '{}_{}.npy'.format(video_name, "swin")
             if save_file in os.listdir(os.path.join(args.output_dir)):
                 print("{} has been extracted".format(save_file))
             else:
@@ -206,38 +220,3 @@ if __name__ == '__main__':
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-# [batch_size, channel, temporal_dim, height, width]
-# dummy_x = torch.rand(2, 3, 16, 224, 224).to('cuda')
-
-# # SwinTransformer3D without cls_head
-# backbone = model.backbone.to('cuda')
-
-# # [batch_size, hidden_dim, temporal_dim/2, height/32, width/32]
-# feat = backbone(dummy_x)
-
-# # alternative way
-# # feat = model.extract_feat(dummy_x)
-
-# # mean pooling
-# feat = feat.mean(dim=[2,3,4]) # [batch_size, hidden_dim]
-
-# # project
-# batch_size, hidden_dim = feat.shape
-# print(feat.shape)
-# feat_dim = 512
-# proj = nn.Parameter(torch.randn(hidden_dim, feat_dim))
-
-# # final output
-# output = feat @ proj # [batch_size, feat_dim]
